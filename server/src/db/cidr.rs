@@ -112,23 +112,7 @@ impl DatabaseCidr {
         Ok(Cidr { id, contents })
     }
 
-    /// Update self with new contents, validating them and updating the backend in the process.
-    /// Currently this only supports updating the name and ignores changes to any other field.
-    pub fn update(&mut self, conn: &Connection, contents: CidrContents) -> Result<(), ServerError> {
-        let new_contents = CidrContents {
-            name: contents.name,
-            ..self.contents.clone()
-        };
-
-        conn.execute(
-            "UPDATE cidrs SET name = ?2 WHERE id = ?1",
-            params![self.id, &*new_contents.name,],
-        )?;
-
-        self.contents = new_contents;
-        Ok(())
-    }
-
+    #[allow(dead_code)]
     pub fn delete(conn: &Connection, id: i64) -> Result<(), ServerError> {
         conn.execute("DELETE FROM cidrs WHERE id = ?1", params![id])?;
         Ok(())

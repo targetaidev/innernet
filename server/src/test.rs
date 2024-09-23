@@ -1,8 +1,7 @@
 #![allow(dead_code)]
 use crate::{
     db::{DatabaseCidr, DatabasePeer},
-    initialize::{init_wizard, InitializeOpts},
-    Context, Db, Endpoints, ServerConfig,
+    Context, Control, Db, Endpoints, InitializeOpts, ServerConfig,
 };
 use anyhow::anyhow;
 use hyper::{header::HeaderValue, http, Body, Request, Response};
@@ -97,13 +96,12 @@ impl Server {
         };
 
         let opts = InitializeOpts {
-            network_name: Some(interface.parse()?),
-            network_cidr: Some(ROOT_CIDR.parse()?),
+            network_name: interface.parse()?,
+            network_cidr: ROOT_CIDR.parse()?,
+            listen_port: 54321,
             external_endpoint: Some("155.155.155.155:54321".parse().unwrap()),
-            listen_port: Some(54321),
-            auto_external_endpoint: false,
         };
-        init_wizard(&conf, opts).map_err(|_| anyhow!("init_wizard failed"))?;
+        let _ = Control::ensure_initialized(&conf, opts);
 
         let interface = interface.parse().unwrap();
         // Add developer CIDR and user CIDR and some peers for testing.

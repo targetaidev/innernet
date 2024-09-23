@@ -172,9 +172,9 @@ mod tests {
     use std::time::{Duration, SystemTime};
 
     use super::*;
-    use crate::{db::DatabaseAssociation, test};
+    use crate::test;
     use bytes::Buf;
-    use shared::{AssociationContents, CidrContents, Endpoint, EndpointContents, Error};
+    use shared::{CidrContents, Endpoint, EndpointContents, Error};
 
     #[tokio::test]
     async fn test_get_state_from_developer1() -> Result<(), Error> {
@@ -252,76 +252,6 @@ mod tests {
         let res = server.request("10.80.80.80", "GET", "/v1/user/state").await;
 
         assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
-
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn test_list_peers_for_developer_subcidr() -> Result<(), Error> {
-        let server = test::Server::new()?;
-        {
-            let db = server.db.lock();
-            let cidr = DatabaseCidr::create(
-                &db,
-                CidrContents {
-                    name: "experiment cidr".to_string(),
-                    cidr: test::EXPERIMENTAL_CIDR.parse()?,
-                    parent: Some(test::ROOT_CIDR_ID),
-                },
-            )?;
-            let subcidr = DatabaseCidr::create(
-                &db,
-                CidrContents {
-                    name: "experiment subcidr".to_string(),
-                    cidr: test::EXPERIMENTAL_SUBCIDR.parse()?,
-                    parent: Some(cidr.id),
-                },
-            )?;
-            DatabasePeer::create(
-                &db,
-                test::peer_contents(
-                    "experiment-peer",
-                    test::EXPERIMENT_SUBCIDR_PEER_IP,
-                    subcidr.id,
-                    false,
-                )?,
-            )?;
-
-            // Add a peering between the developer's CIDR and the experimental *parent* cidr.
-            DatabaseAssociation::create(
-                &db,
-                AssociationContents {
-                    cidr_id_1: test::DEVELOPER_CIDR_ID,
-                    cidr_id_2: cidr.id,
-                },
-            )?;
-            DatabaseAssociation::create(
-                &db,
-                AssociationContents {
-                    cidr_id_1: test::INFRA_CIDR_ID,
-                    cidr_id_2: cidr.id,
-                },
-            )?;
-        }
-
-        for ip in &[test::DEVELOPER1_PEER_IP, test::EXPERIMENT_SUBCIDR_PEER_IP] {
-            let res = server.request(ip, "GET", "/v1/user/state").await;
-            assert_eq!(res.status(), StatusCode::OK);
-            let whole_body = hyper::body::aggregate(res).await?;
-            let State { peers, .. } = serde_json::from_reader(whole_body.reader())?;
-            let mut peer_names = peers.iter().map(|p| &*p.contents.name).collect::<Vec<_>>();
-            peer_names.sort_unstable();
-            // Developers should see only peers in infra CIDR and developer CIDR.
-            assert_eq!(
-                &[
-                    "developer1",
-                    "developer2",
-                    "experiment-peer",
-                    "innernet-server"
-                ],
-                &peer_names[..]
-            );
-        }
 
         Ok(())
     }

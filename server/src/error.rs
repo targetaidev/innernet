@@ -14,6 +14,9 @@ pub enum ServerError {
     #[error("invalid query")]
     InvalidQuery,
 
+    #[error("internal error: {0}")]
+    Internal(String),
+
     #[error("endpoint gone")]
     Gone,
 
@@ -43,7 +46,7 @@ impl<'a> From<&'a ServerError> for StatusCode {
             Unauthorized => StatusCode::UNAUTHORIZED,
             NotFound => StatusCode::NOT_FOUND,
             Gone => StatusCode::GONE,
-            InvalidQuery | Json(_) => StatusCode::BAD_REQUEST,
+            InvalidQuery | Internal(_) | Json(_) => StatusCode::BAD_REQUEST,
             // Special-case the constraint violation situation.
             Database(rusqlite::Error::SqliteFailure(libsqlite3_sys::Error { code, .. }, ..))
                 if *code == libsqlite3_sys::ErrorCode::ConstraintViolation =>
