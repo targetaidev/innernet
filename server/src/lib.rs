@@ -1,5 +1,6 @@
 use anyhow::{anyhow, bail};
 use colored::*;
+use db::{DatabaseCidr, DatabasePeer};
 use hyper::{http, server::conn::AddrStream, Body, Request, Response};
 use ipnet::IpNet;
 use parking_lot::{Mutex, RwLock};
@@ -9,8 +10,8 @@ use serde::{Deserialize, Serialize};
 use shared::{
     get_local_addrs,
     interface_config::{InterfaceConfig, InterfaceInfo, ServerInfo},
-    wg, CidrContents, CidrTree, Endpoint, Error, Hostname, IoErrorContext, IpNetExt, NetworkOpts,
-    PeerContents, INNERNET_PUBKEY_HEADER, PERSISTENT_KEEPALIVE_INTERVAL_SECS,
+    wg, CidrContents, CidrTree, IoErrorContext, IpNetExt, NetworkOpts, PeerContents,
+    INNERNET_PUBKEY_HEADER, PERSISTENT_KEEPALIVE_INTERVAL_SECS,
 };
 use std::{
     collections::{HashMap, VecDeque},
@@ -35,7 +36,6 @@ mod error;
 mod test;
 mod util;
 
-use db::{DatabaseCidr, DatabasePeer};
 pub use error::ServerError;
 pub use wireguard_control::InterfaceName;
 
@@ -89,7 +89,7 @@ pub struct ConfigFile {
 }
 
 impl ConfigFile {
-    pub fn write_to_path<P: AsRef<Path>>(&self, path: P) -> Result<(), Error> {
+    pub fn write_to_path<P: AsRef<Path>>(&self, path: P) -> Result<(), shared::Error> {
         let mut invitation_file = File::create(&path).with_path(&path)?;
         shared::chmod(&invitation_file, 0o600)?;
         invitation_file
@@ -98,7 +98,7 @@ impl ConfigFile {
         Ok(())
     }
 
-    pub fn from_file<P: AsRef<Path>>(path: P) -> Result<Self, Error> {
+    pub fn from_file<P: AsRef<Path>>(path: P) -> Result<Self, shared::Error> {
         let path = path.as_ref();
         let file = File::open(path).with_path(path)?;
         if shared::chmod(&file, 0o600)? {
@@ -151,9 +151,7 @@ impl ServerConfig {
     }
 }
 
-fn create_database<P: AsRef<Path>>(
-    database_path: P,
-) -> Result<Connection, Box<dyn std::error::Error>> {
+fn create_database<P: AsRef<Path>>(database_path: P) -> Result<Connection, rusqlite::Error> {
     let conn = Connection::open(&database_path)?;
     conn.pragma_update(None, "foreign_keys", 1)?;
     conn.execute(db::peer::CREATE_TABLE_SQL, params![])?;
@@ -169,7 +167,7 @@ fn populate_database(
     conf: &ServerConfig,
     conn: &Connection,
     opts: &InitializeOpts,
-) -> Result<ConfigFile, Error> {
+) -> Result<ConfigFile, shared::Error> {
     const SERVER_NAME: &str = "innernet-server";
 
     let mut cidrs = DatabaseCidr::list(conn)?;
@@ -190,11 +188,13 @@ fn populate_database(
         .map_err(|_| anyhow!("failed to create root CIDR"))?,
     };
 
-    let our_ip = opts
+    let Some(our_ip) = opts
         .network_cidr
         .hosts()
         .find(|ip| opts.network_cidr.is_assignable(ip))
-        .unwrap();
+    else {
+        bail!("no assignable IP found in network CIDR");
+    };
 
     let server_cidr = match cidrs.iter().position(|cidr| cidr.name == SERVER_NAME) {
         Some(cidr_index) => cidrs.remove(cidr_index),
@@ -217,7 +217,7 @@ fn populate_database(
     let config = match peers.into_iter().find(|peer| peer.name == peer_name) {
         Some(_) => ConfigFile::from_file(config_path)?,
         None => {
-            let endpoint: Endpoint = if let Some(endpoint) = &opts.external_endpoint {
+            let endpoint: shared::Endpoint = if let Some(endpoint) = &opts.external_endpoint {
                 endpoint.clone()
             } else {
                 let ip = publicip::get_any(Preference::Ipv4)
@@ -263,7 +263,7 @@ fn populate_database(
 fn open_database_connection(
     interface: &InterfaceName,
     conf: &ServerConfig,
-) -> Result<rusqlite::Connection, Error> {
+) -> Result<rusqlite::Connection, shared::Error> {
     let database_path = conf.database_path(interface);
     if !Path::new(&database_path).exists() {
         bail!(
@@ -291,7 +291,7 @@ pub struct InitializeOpts {
     pub listen_port: u16,
 
     /// This server's external endpoint (ex: 100.100.100.100:51820)
-    pub external_endpoint: Option<Endpoint>,
+    pub external_endpoint: Option<shared::Endpoint>,
 }
 
 #[derive(Debug, Clone)]
@@ -303,7 +303,10 @@ pub struct Control {
 }
 
 impl Control {
-    pub fn ensure_initialized(conf: &ServerConfig, opts: InitializeOpts) -> Result<Self, Error> {
+    pub fn ensure_initialized(
+        conf: &ServerConfig,
+        opts: InitializeOpts,
+    ) -> Result<Self, shared::Error> {
         shared::ensure_dirs_exist(&[conf.config_dir(), conf.database_dir()])
             .map_err(|_| anyhow!("Failed to create config and database directories",))?;
 
@@ -316,13 +319,15 @@ impl Control {
 
         let config = populate_database(conf, &conn, &opts)?;
 
+        let backend = Backend::variants()
+            .first()
+            .and_then(|s| s.parse::<Backend>().ok())
+            .ok_or_else(|| anyhow!("failed to select backend for wg"))?;
+
         let db = Arc::new(Mutex::new(conn));
         let network = NetworkOpts {
             no_routing: false,
-            backend: Backend::variants()
-                .first()
-                .and_then(|s| s.parse::<Backend>().ok())
-                .unwrap(),
+            backend,
             mtu: None,
         };
 
@@ -367,7 +372,7 @@ impl Control {
             })?;
 
         let name = edge_id
-            .parse::<Hostname>()
+            .parse::<shared::Hostname>()
             .map_err(|_| ServerError::InvalidQuery)?;
 
         let cidr = match cidrs.iter().find(|c| c.name == edge_id) {
@@ -437,7 +442,7 @@ impl Control {
         let conn = self.db.lock();
 
         let name = edge_id
-            .parse::<Hostname>()
+            .parse::<shared::Hostname>()
             .map_err(|_| ServerError::InvalidQuery)?;
 
         let mut peer =
@@ -464,7 +469,7 @@ impl Control {
         Ok(())
     }
 
-    pub async fn serve(&self) -> Result<(), Error> {
+    pub async fn serve(&self) -> Result<(), shared::Error> {
         let conn = self.db.lock();
 
         let mut peers = DatabasePeer::list(&conn)?;
@@ -490,7 +495,7 @@ impl Control {
 
         log::info!("{} peers added to wireguard interface.", peers.len());
 
-        let candidates: Vec<Endpoint> = get_local_addrs()?
+        let candidates: Vec<shared::Endpoint> = get_local_addrs()?
             .map(|addr| SocketAddr::from((addr, self.config.listen_port)).into())
             .collect();
         let num_candidates = candidates.len();
@@ -597,7 +602,7 @@ fn spawn_expired_invite_sweeper(db: Db) {
 ///
 /// See https://github.com/tonarino/innernet/issues/26 for more details.
 #[cfg(target_os = "linux")]
-fn get_listener(addr: SocketAddr, interface: &InterfaceName) -> Result<TcpListener, Error> {
+fn get_listener(addr: SocketAddr, interface: &InterfaceName) -> Result<TcpListener, shared::Error> {
     let listener = TcpListener::bind(addr)?;
     listener.set_nonblocking(true)?;
     let sock = socket2::Socket::from(listener);
