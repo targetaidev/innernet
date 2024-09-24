@@ -190,7 +190,7 @@ fn populate_database(
         .iter()
         .position(|cidr| cidr.name == opts.network_name.to_string())
     {
-        Some(cidr_index) => cidrs.remove(cidr_index),
+        Some(cidr_index) => cidrs.swap_remove(cidr_index),
         None => DatabaseCidr::create(
             conn,
             CidrContents {
@@ -211,7 +211,7 @@ fn populate_database(
     };
 
     let server_cidr = match cidrs.iter().position(|cidr| cidr.name == SERVER_NAME) {
-        Some(cidr_index) => cidrs.remove(cidr_index),
+        Some(cidr_index) => cidrs.swap_remove(cidr_index),
         None => DatabaseCidr::create(
             conn,
             CidrContents {
