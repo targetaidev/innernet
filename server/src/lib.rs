@@ -177,109 +177,6 @@ fn create_database<P: AsRef<Path>>(database_path: P) -> Result<Connection, rusql
 
     Ok(conn)
 }
-const SERVER_NAME: &str = "innernet-server";
-
-fn populate_database(
-    conf: &ServerConfig,
-    conn: &Connection,
-    opts: &InitializeOpts,
-) -> Result<ConfigFile, shared::Error> {
-    let mut cidrs = DatabaseCidr::list(conn)?;
-
-    let root_cidr = match cidrs
-        .iter()
-        .position(|cidr| cidr.name == opts.network_name.to_string())
-    {
-        Some(cidr_index) => cidrs.swap_remove(cidr_index),
-        None => DatabaseCidr::create(
-            conn,
-            CidrContents {
-                name: opts.network_name.to_string(),
-                cidr: opts.network_cidr,
-                parent: None,
-            },
-        )
-        .map_err(|_| anyhow!("failed to create root CIDR"))?,
-    };
-
-    let Some(our_ip) = opts
-        .network_cidr
-        .hosts()
-        .find(|ip| opts.network_cidr.is_assignable(ip))
-    else {
-        bail!("no assignable IP found in network CIDR");
-    };
-
-    let server_cidr = match cidrs.iter().position(|cidr| cidr.name == SERVER_NAME) {
-        Some(cidr_index) => cidrs.swap_remove(cidr_index),
-        None => DatabaseCidr::create(
-            conn,
-            CidrContents {
-                name: SERVER_NAME.into(),
-                cidr: IpNet::new(our_ip, opts.network_cidr.max_prefix_len())?,
-                parent: Some(root_cidr.id),
-            },
-        )
-        .map_err(|_| anyhow!("failed to create innernet-server CIDR"))?,
-    };
-
-    let peers = DatabasePeer::list(conn)?;
-
-    let server_peer_name = SERVER_NAME.parse().map_err(|e: &str| anyhow!(e))?;
-
-    let server_private_key = if peers.iter().any(|peer| peer.name == server_peer_name) {
-        None
-    } else {
-        let endpoint: shared::Endpoint = if let Some(endpoint) = &opts.external_endpoint {
-            endpoint.clone()
-        } else {
-            let ip = publicip::get_any(Preference::Ipv4)
-                .ok_or_else(|| anyhow!("couldn't get external IP"))?;
-            SocketAddr::new(ip, opts.listen_port).into()
-        };
-
-        let our_keypair = KeyPair::generate();
-
-        DatabasePeer::create(
-            conn,
-            PeerContents {
-                name: SERVER_NAME.parse().map_err(|e: &str| anyhow!(e))?,
-                ip: our_ip,
-                cidr_id: server_cidr.id,
-                public_key: our_keypair.public.to_base64(),
-                endpoint: Some(endpoint),
-                is_admin: true,
-                is_disabled: false,
-                is_redeemed: true,
-                persistent_keepalive_interval: Some(PERSISTENT_KEEPALIVE_INTERVAL_SECS),
-                invite_expires: None,
-                candidates: vec![],
-            },
-        )
-        .map_err(|_| anyhow!("failed to create innernet peer."))?;
-
-        Some(our_keypair.private)
-    };
-
-    let config_path = conf.config_path(&opts.network_name);
-
-    let config = match server_private_key {
-        None => ConfigFile::from_file(config_path)?,
-        Some(private_key) => {
-            let config = ConfigFile {
-                private_key: private_key.to_base64(),
-                listen_port: opts.listen_port,
-                address: our_ip,
-                network_cidr_prefix: opts.network_cidr.prefix_len(),
-            };
-
-            config.write_to_path(config_path)?;
-            config
-        },
-    };
-
-    Ok(config)
-}
 
 fn open_database_connection(
     interface: &InterfaceName,
@@ -298,6 +195,128 @@ fn open_database_connection(
     conn.pragma_update(None, "foreign_keys", 1)?;
     db::auto_migrate(&conn)?;
     Ok(conn)
+}
+
+const SERVER_NAME: &str = "innernet-server";
+
+fn ensure_root_cidr(
+    conn: &Connection,
+    cidrs: &mut Vec<shared::Cidr>,
+    network_name: &InterfaceName,
+    network_cidr: &IpNet,
+) -> Result<usize, shared::Error> {
+    match cidrs
+        .iter()
+        .position(|cidr| cidr.name == network_name.to_string())
+    {
+        Some(cidr_index) => Ok(cidr_index),
+        None => {
+            let cidr = DatabaseCidr::create(
+                conn,
+                CidrContents {
+                    name: network_name.to_string(),
+                    cidr: *network_cidr,
+                    parent: None,
+                },
+            )
+            .map_err(|_| anyhow!("failed to create root CIDR"))?;
+            cidrs.push(cidr);
+            Ok(cidrs.len() - 1)
+        },
+    }
+}
+
+fn ensure_server_cidr(
+    conn: &Connection,
+    cidrs: &mut Vec<shared::Cidr>,
+    network_cidr: &IpNet,
+    root_cidr_id: i64,
+) -> Result<usize, shared::Error> {
+    let Some(our_ip) = network_cidr
+        .hosts()
+        .find(|ip| network_cidr.is_assignable(ip))
+    else {
+        bail!("no assignable IP found in network CIDR");
+    };
+
+    match cidrs.iter().position(|cidr| cidr.name == SERVER_NAME) {
+        Some(cidr_index) => Ok(cidr_index),
+        None => {
+            let cidr = DatabaseCidr::create(
+                conn,
+                CidrContents {
+                    name: SERVER_NAME.into(),
+                    cidr: IpNet::new(our_ip, network_cidr.max_prefix_len())?,
+                    parent: Some(root_cidr_id),
+                },
+            )
+            .map_err(|_| anyhow!("failed to create innernet-server CIDR"))?;
+            cidrs.push(cidr);
+            Ok(cidrs.len() - 1)
+        },
+    }
+}
+
+fn ensure_server_peer(
+    conn: &Connection,
+    server_cidr: &shared::Cidr,
+    external_endpoint: &Option<shared::Endpoint>,
+    listen_port: u16,
+) -> Result<Option<KeyPair>, shared::Error> {
+    let peers = DatabasePeer::list(conn)?;
+
+    let server_peer_name = SERVER_NAME.parse().map_err(|e: &str| anyhow!(e))?;
+
+    if peers.iter().any(|peer| peer.name == server_peer_name) {
+        Ok(None)
+    } else {
+        let endpoint: shared::Endpoint = if let Some(endpoint) = &external_endpoint {
+            endpoint.clone()
+        } else {
+            let ip = publicip::get_any(Preference::Ipv4)
+                .ok_or_else(|| anyhow!("couldn't get external IP"))?;
+            SocketAddr::new(ip, listen_port).into()
+        };
+
+        let our_keypair = KeyPair::generate();
+
+        DatabasePeer::create(
+            conn,
+            PeerContents {
+                name: SERVER_NAME.parse().map_err(|e: &str| anyhow!(e))?,
+                ip: server_cidr.cidr.addr(),
+                cidr_id: server_cidr.id,
+                public_key: our_keypair.public.to_base64(),
+                endpoint: Some(endpoint),
+                is_admin: true,
+                is_disabled: false,
+                is_redeemed: true,
+                persistent_keepalive_interval: Some(PERSISTENT_KEEPALIVE_INTERVAL_SECS),
+                invite_expires: None,
+                candidates: vec![],
+            },
+        )
+        .map_err(|_| anyhow!("failed to create innernet peer."))?;
+
+        Ok(Some(our_keypair))
+    }
+}
+
+fn get_available_ip_in_cidr(
+    cidr: &shared::Cidr,
+    peers: &[DatabasePeer],
+) -> (Option<IpAddr>, Option<IpNet>) {
+    let candidate_ips = cidr.hosts().filter(|ip| cidr.is_assignable(ip));
+    let mut available_ip = None;
+    for ip in candidate_ips {
+        if !peers.iter().any(|peer| peer.ip == ip) {
+            available_ip = Some(ip);
+            break;
+        }
+    }
+    let available_ip_net =
+        available_ip.and_then(|ip| IpNet::new(ip, cidr.cidr.max_prefix_len()).ok());
+    (available_ip, available_ip_net)
 }
 
 #[derive(Debug, Clone)]
@@ -323,13 +342,47 @@ impl Control {
                 .map_err(|_| anyhow!("failed to create database",))?,
         };
 
-        let config = populate_database(conf, &conn, &opts)?;
+        let mut cidrs = DatabaseCidr::list(&conn)?;
+
+        let root_cidr_index =
+            ensure_root_cidr(&conn, &mut cidrs, &opts.network_name, &opts.network_cidr)?;
+        let root_cidr = cidrs.swap_remove(root_cidr_index);
+
+        let server_cidr_index =
+            ensure_server_cidr(&conn, &mut cidrs, &opts.network_cidr, root_cidr.id)?;
+        let server_cidr = cidrs.swap_remove(server_cidr_index);
+
+        let server_key = ensure_server_peer(
+            &conn,
+            &server_cidr,
+            &opts.external_endpoint,
+            opts.listen_port,
+        )?;
+
+        let config_path = conf.config_path(&opts.network_name);
+
+        let config = match server_key {
+            None => ConfigFile::from_file(config_path)?,
+            Some(key) => {
+                let config = ConfigFile {
+                    private_key: key.private.to_base64(),
+                    listen_port: opts.listen_port,
+                    address: server_cidr.cidr.addr(),
+                    network_cidr_prefix: opts.network_cidr.prefix_len(),
+                };
+
+                config.write_to_path(config_path)?;
+                config
+            },
+        };
 
         let backend = Backend::variants()
             .first()
             .and_then(|s| s.parse::<Backend>().ok())
             .ok_or_else(|| anyhow!("failed to select backend for wg"))?;
+
         let db = Arc::new(Mutex::new(conn));
+
         let network = NetworkOpts {
             no_routing: false,
             backend,
@@ -348,58 +401,55 @@ impl Control {
         let conn = self.db.lock();
 
         let cidrs = DatabaseCidr::list(&conn)?;
-
-        let parent_cidr = cidrs
-            .iter()
-            .find(|cidr| cidr.name == self.interface.to_string())
-            .ok_or_else(|| ServerError::Internal(String::from("parent cidr not found")))?;
-
-        let cidr_tree = CidrTree::new(&cidrs[..]);
-
         let peers = DatabasePeer::list(&conn)?;
 
-        let candidate_ips = parent_cidr
-            .hosts()
-            .filter(|ip| parent_cidr.is_assignable(ip));
-        let mut available_ip = None;
-        for ip in candidate_ips {
-            if !peers.iter().any(|peer| peer.ip == ip) {
-                available_ip = Some(ip);
-                break;
-            }
-        }
+        let root_cidr = cidrs
+            .iter()
+            .find(|cidr| cidr.name == self.interface.to_string())
+            .ok_or_else(|| ServerError::Internal(String::from("root cidr not found")))?;
 
-        let available_ip = available_ip.ok_or_else(|| {
-            ServerError::Internal(String::from("couldn't find available ip for root cidr"))
-        })?;
-        let available_ip_net = IpNet::new(available_ip, parent_cidr.cidr.max_prefix_len())
-            .map_err(|_| {
-                ServerError::Internal(String::from("couldn't construct child cidr for root cidr"))
+        let server_peer_name = SERVER_NAME
+            .parse()
+            .map_err(|_| ServerError::Internal(String::from("should be a hostname")))?;
+        let server_peer = peers
+            .iter()
+            .find(|peer| peer.name == server_peer_name)
+            .ok_or_else(|| {
+                ServerError::Internal(String::from("server peer must always be present"))
             })?;
 
-        let name = edge_id
-            .parse::<shared::Hostname>()
-            .map_err(|_| ServerError::InvalidQuery)?;
-
-        let cidr = match cidrs.iter().find(|c| c.name == edge_id) {
-            Some(c) => c,
-            None => {
-                let cidr_request = CidrContents {
-                    name: edge_id,
-                    cidr: available_ip_net,
-                    parent: Some(parent_cidr.id),
-                };
-
-                &DatabaseCidr::create(&conn, cidr_request)?
+        let (peer_ip, peer_ip_net) = match get_available_ip_in_cidr(root_cidr, &peers) {
+            (Some(ip), Some(net)) => (ip, net),
+            _ => {
+                return Err(ServerError::Internal(String::from(
+                    "couldn't construct peer ip and cidr in root cidr",
+                )))
             },
         };
 
-        let default_keypair = KeyPair::generate();
+        let peer_name = edge_id
+            .parse::<shared::Hostname>()
+            .map_err(|_| ServerError::InvalidQuery)?;
+
+        let peer_cidr = match cidrs.iter().find(|c| c.name == edge_id) {
+            Some(c) => c,
+            None => &DatabaseCidr::create(
+                &conn,
+                CidrContents {
+                    name: edge_id,
+                    cidr: peer_ip_net,
+                    parent: Some(root_cidr.id),
+                },
+            )?,
+        };
+
+        let peer_keypair = KeyPair::generate();
+
         let peer_request = PeerContents {
-            name,
-            ip: available_ip,
-            cidr_id: cidr.id,
-            public_key: default_keypair.public.to_base64(),
+            name: peer_name,
+            ip: peer_ip,
+            cidr_id: peer_cidr.id,
+            public_key: peer_keypair.public.to_base64(),
             endpoint: None,
             is_admin: false,
             is_disabled: false,
@@ -418,13 +468,14 @@ impl Control {
                 .map_err(|_| ServerError::WireGuard)?;
         }
 
-        let server_peer = DatabasePeer::get(&conn, 1)?;
-        let server_api_addr = &SocketAddr::new(self.config.address, self.config.listen_port);
+        let cidr_tree = CidrTree::new(&cidrs);
+
+        let server_api_endpoint = &SocketAddr::new(self.config.address, self.config.listen_port);
 
         let peer_invitation = InterfaceConfig {
             interface: InterfaceInfo {
                 network_name: self.interface.to_string(),
-                private_key: default_keypair.private.to_base64(),
+                private_key: peer_keypair.private.to_base64(),
                 address: IpNet::new(peer.ip, cidr_tree.prefix_len()).map_err(|_| {
                     ServerError::Internal(String::from("couldn't construct cidr for invitation"))
                 })?,
@@ -436,7 +487,7 @@ impl Control {
                         "server peer should have a wireguard endpoint",
                     ))
                 })?,
-                internal_endpoint: *server_api_addr,
+                internal_endpoint: *server_api_endpoint,
                 public_key: server_peer.public_key.clone(),
             },
         };
