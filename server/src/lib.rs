@@ -151,6 +151,21 @@ impl ServerConfig {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InitializeOpts {
+    /// The network name (ex: evilcorp)
+    pub network_name: InterfaceName,
+
+    /// The network CIDR (ex: 10.42.0.0/16)
+    pub network_cidr: IpNet,
+
+    /// Port to listen on (for the WireGuard interface)
+    pub listen_port: u16,
+
+    /// This server's external endpoint (ex: 100.100.100.100:51820)
+    pub external_endpoint: Option<shared::Endpoint>,
+}
+
 fn create_database<P: AsRef<Path>>(database_path: P) -> Result<Connection, rusqlite::Error> {
     let conn = Connection::open(&database_path)?;
     conn.pragma_update(None, "foreign_keys", 1)?;
@@ -162,14 +177,13 @@ fn create_database<P: AsRef<Path>>(database_path: P) -> Result<Connection, rusql
 
     Ok(conn)
 }
+const SERVER_NAME: &str = "innernet-server";
 
 fn populate_database(
     conf: &ServerConfig,
     conn: &Connection,
     opts: &InitializeOpts,
 ) -> Result<ConfigFile, shared::Error> {
-    const SERVER_NAME: &str = "innernet-server";
-
     let mut cidrs = DatabaseCidr::list(conn)?;
 
     let root_cidr = match cidrs
@@ -208,49 +222,56 @@ fn populate_database(
         )
         .map_err(|_| anyhow!("failed to create innernet-server CIDR"))?,
     };
-    let peer_name = SERVER_NAME.parse().map_err(|e: &str| anyhow!(e))?;
 
     let peers = DatabasePeer::list(conn)?;
 
+    let server_peer_name = SERVER_NAME.parse().map_err(|e: &str| anyhow!(e))?;
+
+    let server_private_key = if peers.iter().any(|peer| peer.name == server_peer_name) {
+        None
+    } else {
+        let endpoint: shared::Endpoint = if let Some(endpoint) = &opts.external_endpoint {
+            endpoint.clone()
+        } else {
+            let ip = publicip::get_any(Preference::Ipv4)
+                .ok_or_else(|| anyhow!("couldn't get external IP"))?;
+            SocketAddr::new(ip, opts.listen_port).into()
+        };
+
+        let our_keypair = KeyPair::generate();
+
+        DatabasePeer::create(
+            conn,
+            PeerContents {
+                name: SERVER_NAME.parse().map_err(|e: &str| anyhow!(e))?,
+                ip: our_ip,
+                cidr_id: server_cidr.id,
+                public_key: our_keypair.public.to_base64(),
+                endpoint: Some(endpoint),
+                is_admin: true,
+                is_disabled: false,
+                is_redeemed: true,
+                persistent_keepalive_interval: Some(PERSISTENT_KEEPALIVE_INTERVAL_SECS),
+                invite_expires: None,
+                candidates: vec![],
+            },
+        )
+        .map_err(|_| anyhow!("failed to create innernet peer."))?;
+
+        Some(our_keypair.private)
+    };
+
     let config_path = conf.config_path(&opts.network_name);
 
-    let config = match peers.into_iter().find(|peer| peer.name == peer_name) {
-        Some(_) => ConfigFile::from_file(config_path)?,
-        None => {
-            let endpoint: shared::Endpoint = if let Some(endpoint) = &opts.external_endpoint {
-                endpoint.clone()
-            } else {
-                let ip = publicip::get_any(Preference::Ipv4)
-                    .ok_or_else(|| anyhow!("couldn't get external IP"))?;
-                SocketAddr::new(ip, opts.listen_port).into()
-            };
-
-            let our_keypair = KeyPair::generate();
-
+    let config = match server_private_key {
+        None => ConfigFile::from_file(config_path)?,
+        Some(private_key) => {
             let config = ConfigFile {
-                private_key: our_keypair.private.to_base64(),
+                private_key: private_key.to_base64(),
                 listen_port: opts.listen_port,
                 address: our_ip,
                 network_cidr_prefix: opts.network_cidr.prefix_len(),
             };
-
-            let _me = DatabasePeer::create(
-                conn,
-                PeerContents {
-                    name: SERVER_NAME.parse().map_err(|e: &str| anyhow!(e))?,
-                    ip: our_ip,
-                    cidr_id: server_cidr.id,
-                    public_key: our_keypair.public.to_base64(),
-                    endpoint: Some(endpoint),
-                    is_admin: true,
-                    is_disabled: false,
-                    is_redeemed: true,
-                    persistent_keepalive_interval: Some(PERSISTENT_KEEPALIVE_INTERVAL_SECS),
-                    invite_expires: None,
-                    candidates: vec![],
-                },
-            )
-            .map_err(|_| anyhow!("failed to create innernet peer."))?;
 
             config.write_to_path(config_path)?;
             config
@@ -277,21 +298,6 @@ fn open_database_connection(
     conn.pragma_update(None, "foreign_keys", 1)?;
     db::auto_migrate(&conn)?;
     Ok(conn)
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct InitializeOpts {
-    /// The network name (ex: evilcorp)
-    pub network_name: InterfaceName,
-
-    /// The network CIDR (ex: 10.42.0.0/16)
-    pub network_cidr: IpNet,
-
-    /// Port to listen on (for the WireGuard interface)
-    pub listen_port: u16,
-
-    /// This server's external endpoint (ex: 100.100.100.100:51820)
-    pub external_endpoint: Option<shared::Endpoint>,
 }
 
 #[derive(Debug, Clone)]
@@ -323,7 +329,6 @@ impl Control {
             .first()
             .and_then(|s| s.parse::<Backend>().ok())
             .ok_or_else(|| anyhow!("failed to select backend for wg"))?;
-
         let db = Arc::new(Mutex::new(conn));
         let network = NetworkOpts {
             no_routing: false,
@@ -350,6 +355,7 @@ impl Control {
             .ok_or_else(|| ServerError::Internal(String::from("parent cidr not found")))?;
 
         let cidr_tree = CidrTree::new(&cidrs[..]);
+
         let peers = DatabasePeer::list(&conn)?;
 
         let candidate_ips = parent_cidr
