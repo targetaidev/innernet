@@ -198,13 +198,9 @@ impl DatabasePeer {
     }
 
     pub fn revoke(&self, conn: &Connection) -> Result<(), ServerError> {
-        if self.is_redeemed {
-            return Err(ServerError::Gone);
-        }
-
         conn.execute(
             "DELETE FROM peers
-            WHERE is_redeemed = 0 AND id = ?1",
+            WHERE id = ?1",
             params![self.id],
         )?;
 
