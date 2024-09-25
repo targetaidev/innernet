@@ -519,7 +519,7 @@ impl Control {
         let peer =
             DatabasePeer::get_from_name(&conn, name).map_err(|_| ServerError::NotFound)?;
 
-        peer.revoke(&conn)?;
+        peer.delete(&conn)?;
 
         let public_key = Key::from_base64(&peer.public_key).map_err(|_| ServerError::WireGuard)?;
         DeviceUpdate::new()

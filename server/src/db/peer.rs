@@ -197,7 +197,7 @@ impl DatabasePeer {
         }
     }
 
-    pub fn revoke(&self, conn: &Connection) -> Result<(), ServerError> {
+    pub fn delete(&self, conn: &Connection) -> Result<(), ServerError> {
         conn.execute(
             "DELETE FROM peers
             WHERE id = ?1",
