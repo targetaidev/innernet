@@ -2,7 +2,6 @@ use shared::Peer;
 
 use crate::Session;
 
-pub mod admin;
 pub mod user;
 
 /// Inject the collected endpoints from the WG interface into a list of peers.

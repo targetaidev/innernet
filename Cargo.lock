@@ -673,8 +673,6 @@ version = "1.6.1"
 dependencies = [
  "anyhow",
  "bytes",
- "clap",
- "clap_complete",
  "colored",
  "dialoguer",
  "hyper",

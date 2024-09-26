@@ -3,7 +3,7 @@ use crate::ServerError;
 use once_cell::sync::Lazy;
 use regex::Regex;
 use rusqlite::{params, types::Type, Connection};
-use shared::{IpNetExt, Peer, PeerContents, PERSISTENT_KEEPALIVE_INTERVAL_SECS};
+use shared::{Hostname, IpNetExt, Peer, PeerContents, PERSISTENT_KEEPALIVE_INTERVAL_SECS};
 use std::{
     net::IpAddr,
     ops::{Deref, DerefMut},
@@ -197,6 +197,16 @@ impl DatabasePeer {
         }
     }
 
+    pub fn delete(&self, conn: &Connection) -> Result<(), ServerError> {
+        conn.execute(
+            "DELETE FROM peers
+            WHERE id = ?1",
+            params![self.id],
+        )?;
+
+        Ok(())
+    }
+
     pub fn redeem(&mut self, conn: &Connection, pubkey: &str) -> Result<(), ServerError> {
         if self.is_redeemed {
             return Err(ServerError::Gone);
@@ -284,6 +294,16 @@ impl DatabasePeer {
         let result = conn.query_row(
             &format!("SELECT {} FROM peers WHERE ip = ?1", COLUMNS.join(", ")),
             params![ip.to_string()],
+            Self::from_row,
+        )?;
+
+        Ok(result)
+    }
+
+    pub fn get_from_name(conn: &Connection, name: Hostname) -> Result<Self, rusqlite::Error> {
+        let result = conn.query_row(
+            &format!("SELECT {} FROM peers WHERE name = ?1", COLUMNS.join(", ")),
+            params![name.to_string()],
             Self::from_row,
         )?;
 
