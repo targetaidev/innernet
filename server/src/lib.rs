@@ -263,7 +263,7 @@ fn ensure_server_peer(
 ) -> Result<(shared::Peer, Option<KeyPair>), shared::Error> {
     let peers = DatabasePeer::list(conn)?;
 
-    let server_peer_name = SERVER_NAME.parse().map_err(|e: &str| anyhow!(e))?;
+    let server_peer_name = SERVER_NAME.parse().map_err(anyhow::Error::msg)?;
 
     match peers.into_iter().find(|peer| peer.name == server_peer_name) {
         None => {
@@ -280,7 +280,7 @@ fn ensure_server_peer(
             let peer = DatabasePeer::create(
                 conn,
                 PeerContents {
-                    name: SERVER_NAME.parse().map_err(|e: &str| anyhow!(e))?,
+                    name: server_peer_name,
                     ip: server_cidr.cidr.addr(),
                     cidr_id: server_cidr.id,
                     public_key: our_keypair.public.to_base64(),
@@ -516,8 +516,7 @@ impl Control {
 
         let conn = self.db.lock();
 
-        let peer =
-            DatabasePeer::get_from_name(&conn, name).map_err(|_| ServerError::NotFound)?;
+        let peer = DatabasePeer::get_from_name(&conn, name).map_err(|_| ServerError::NotFound)?;
 
         peer.delete(&conn)?;
 
