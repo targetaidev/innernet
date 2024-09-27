@@ -37,12 +37,14 @@ mod test;
 mod util;
 
 pub use error::ServerError;
+pub use shared::Peer;
 pub use wireguard_control::InterfaceName;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 type Db = Arc<Mutex<Connection>>;
 type Endpoints = Arc<RwLock<HashMap<String, SocketAddr>>>;
+type NotifyRedeem = Arc<tokio::sync::mpsc::Sender<()>>;
 
 #[derive(Clone)]
 pub struct Context {
@@ -51,6 +53,7 @@ pub struct Context {
     pub interface: InterfaceName,
     pub backend: Backend,
     pub public_key: Key,
+    pub notify_redeem: NotifyRedeem,
 }
 
 pub struct Session {
@@ -393,6 +396,22 @@ impl Control {
         })
     }
 
+    pub fn get_peers(&self) -> Result<Vec<shared::Peer>, ServerError> {
+        let conn = self.db.lock();
+
+        let server_peer_name = SERVER_NAME
+            .parse()
+            .map_err(|_| ServerError::Internal(String::from("should be a hostname")))?;
+
+        let peers = DatabasePeer::list(&conn)?;
+
+        Ok(peers
+            .into_iter()
+            .filter(|peer| peer.name != server_peer_name && !peer.is_disabled && peer.is_redeemed)
+            .map(|peer| peer.inner)
+            .collect())
+    }
+
     pub fn add_peer(&self, edge_id: String) -> Result<InterfaceConfig, ServerError> {
         if edge_id == SERVER_NAME {
             return Err(ServerError::InvalidQuery);
@@ -529,7 +548,7 @@ impl Control {
         Ok(())
     }
 
-    pub async fn serve(&self) -> Result<(), shared::Error> {
+    pub async fn serve(&self, notify_redeem: NotifyRedeem) -> Result<(), shared::Error> {
         let conn = self.db.lock();
 
         let mut peers = DatabasePeer::list(&conn)?;
@@ -588,6 +607,7 @@ impl Control {
             interface: self.interface,
             public_key,
             backend: self.network.backend,
+            notify_redeem,
         };
 
         log::info!("innernet-server {} starting.", VERSION);
