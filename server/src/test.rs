@@ -169,6 +169,8 @@ impl Server {
     }
 
     pub fn context(&self) -> Context {
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+
         Context {
             db: self.db.clone(),
             interface: self.interface,
@@ -178,6 +180,7 @@ impl Server {
             backend: Backend::Kernel,
             #[cfg(not(target_os = "linux"))]
             backend: Backend::Userspace,
+            notify_redeem: Arc::new(tx), 
         }
     }
 
