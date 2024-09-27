@@ -304,20 +304,26 @@ fn ensure_server_peer(
     }
 }
 
-fn get_available_ip_in_cidr(
-    cidr: &shared::Cidr,
+fn get_available_ip(
+    name: &String,
+    root_cidr: &shared::Cidr,
+    cidrs: &[shared::Cidr],
     peers: &[DatabasePeer],
 ) -> (Option<IpAddr>, Option<IpNet>) {
-    let candidate_ips = cidr.hosts().filter(|ip| cidr.is_assignable(ip));
+    let candidate_ips = root_cidr.hosts().filter(|ip| root_cidr.is_assignable(ip));
     let mut available_ip = None;
     for ip in candidate_ips {
-        if !peers.iter().any(|peer| peer.ip == ip) {
+        if !cidrs
+            .iter()
+            .any(|cidr| cidr.addr() == ip && cidr.name != *name)
+            && !peers.iter().any(|peer| peer.ip == ip)
+        {
             available_ip = Some(ip);
             break;
         }
     }
     let available_ip_net =
-        available_ip.and_then(|ip| IpNet::new(ip, cidr.cidr.max_prefix_len()).ok());
+        available_ip.and_then(|ip| IpNet::new(ip, root_cidr.cidr.max_prefix_len()).ok());
     (available_ip, available_ip_net)
 }
 
@@ -427,7 +433,7 @@ impl Control {
             .find(|cidr| cidr.name == self.interface.to_string())
             .ok_or_else(|| ServerError::Internal(String::from("root cidr not found")))?;
 
-        let (peer_ip, peer_ip_net) = match get_available_ip_in_cidr(root_cidr, &peers) {
+        let (peer_ip, peer_ip_net) = match get_available_ip(&edge_id, root_cidr, &cidrs, &peers) {
             (Some(ip), Some(net)) => (ip, net),
             _ => {
                 return Err(ServerError::Internal(String::from(
