@@ -677,6 +677,13 @@ fn spawn_expired_invite_sweeper(db: Db) {
                 Err(e) => log::error!("Failed to delete expired peer invitations: {}", e),
                 _ => {},
             }
+            match DatabaseCidr::delete_unused_cidrs(&db.lock()) {
+                Ok(deleted) if deleted > 0 => {
+                    log::info!("Deleted {} unused cidrs.", deleted)
+                },
+                Err(e) => log::error!("Failed to delete unused cidrs: {}", e),
+                _ => {},
+            }
         }
     });
 }
