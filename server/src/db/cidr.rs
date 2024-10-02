@@ -148,4 +148,20 @@ impl DatabaseCidr {
 
         Ok(cidr_iter.collect::<Result<Vec<_>, rusqlite::Error>>()?)
     }
+
+    pub fn delete_unused_cidrs(conn: &Connection) -> Result<usize, ServerError> {
+        let deleted = conn.execute(
+            "DELETE FROM cidrs
+            WHERE id NOT IN (
+                SELECT DISTINCT cidr_id FROM peers
+            )
+            AND id NOT IN (
+                SELECT DISTINCT parent FROM cidrs WHERE parent IS NOT NULL
+            )
+            AND parent IS NOT NULL;",
+            params![],
+        )?;
+
+        Ok(deleted)
+    }
 }

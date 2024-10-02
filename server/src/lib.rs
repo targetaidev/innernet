@@ -37,12 +37,14 @@ mod test;
 mod util;
 
 pub use error::ServerError;
+pub use shared::Peer;
 pub use wireguard_control::InterfaceName;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 type Db = Arc<Mutex<Connection>>;
 type Endpoints = Arc<RwLock<HashMap<String, SocketAddr>>>;
+type NotifyRedeem = Arc<tokio::sync::mpsc::Sender<()>>;
 
 #[derive(Clone)]
 pub struct Context {
@@ -51,6 +53,7 @@ pub struct Context {
     pub interface: InterfaceName,
     pub backend: Backend,
     pub public_key: Key,
+    pub notify_redeem: NotifyRedeem,
 }
 
 pub struct Session {
@@ -301,20 +304,26 @@ fn ensure_server_peer(
     }
 }
 
-fn get_available_ip_in_cidr(
-    cidr: &shared::Cidr,
+fn get_available_ip(
+    name: &String,
+    root_cidr: &shared::Cidr,
+    cidrs: &[shared::Cidr],
     peers: &[DatabasePeer],
 ) -> (Option<IpAddr>, Option<IpNet>) {
-    let candidate_ips = cidr.hosts().filter(|ip| cidr.is_assignable(ip));
+    let candidate_ips = root_cidr.hosts().filter(|ip| root_cidr.is_assignable(ip));
     let mut available_ip = None;
     for ip in candidate_ips {
-        if !peers.iter().any(|peer| peer.ip == ip) {
+        if !cidrs
+            .iter()
+            .any(|cidr| cidr.addr() == ip && cidr.name != *name)
+            && !peers.iter().any(|peer| peer.ip == ip)
+        {
             available_ip = Some(ip);
             break;
         }
     }
     let available_ip_net =
-        available_ip.and_then(|ip| IpNet::new(ip, cidr.cidr.max_prefix_len()).ok());
+        available_ip.and_then(|ip| IpNet::new(ip, root_cidr.cidr.max_prefix_len()).ok());
     (available_ip, available_ip_net)
 }
 
@@ -393,6 +402,22 @@ impl Control {
         })
     }
 
+    pub fn get_peers(&self) -> Result<Vec<shared::Peer>, ServerError> {
+        let conn = self.db.lock();
+
+        let server_peer_name = SERVER_NAME
+            .parse()
+            .map_err(|_| ServerError::Internal(String::from("should be a hostname")))?;
+
+        let peers = DatabasePeer::list(&conn)?;
+
+        Ok(peers
+            .into_iter()
+            .filter(|peer| peer.name != server_peer_name && !peer.is_disabled && peer.is_redeemed)
+            .map(|peer| peer.inner)
+            .collect())
+    }
+
     pub fn add_peer(&self, edge_id: String) -> Result<InterfaceConfig, ServerError> {
         if edge_id == SERVER_NAME {
             return Err(ServerError::InvalidQuery);
@@ -408,7 +433,7 @@ impl Control {
             .find(|cidr| cidr.name == self.interface.to_string())
             .ok_or_else(|| ServerError::Internal(String::from("root cidr not found")))?;
 
-        let (peer_ip, peer_ip_net) = match get_available_ip_in_cidr(root_cidr, &peers) {
+        let (peer_ip, peer_ip_net) = match get_available_ip(&edge_id, root_cidr, &cidrs, &peers) {
             (Some(ip), Some(net)) => (ip, net),
             _ => {
                 return Err(ServerError::Internal(String::from(
@@ -529,7 +554,7 @@ impl Control {
         Ok(())
     }
 
-    pub async fn serve(&self) -> Result<(), shared::Error> {
+    pub async fn serve(&self, notify_redeem: NotifyRedeem) -> Result<(), shared::Error> {
         let conn = self.db.lock();
 
         let mut peers = DatabasePeer::list(&conn)?;
@@ -588,6 +613,7 @@ impl Control {
             interface: self.interface,
             public_key,
             backend: self.network.backend,
+            notify_redeem,
         };
 
         log::info!("innernet-server {} starting.", VERSION);
@@ -649,6 +675,13 @@ fn spawn_expired_invite_sweeper(db: Db) {
                     log::info!("Deleted {} expired peer invitations.", deleted)
                 },
                 Err(e) => log::error!("Failed to delete expired peer invitations: {}", e),
+                _ => {},
+            }
+            match DatabaseCidr::delete_unused_cidrs(&db.lock()) {
+                Ok(deleted) if deleted > 0 => {
+                    log::info!("Deleted {} unused cidrs.", deleted)
+                },
+                Err(e) => log::error!("Failed to delete unused cidrs: {}", e),
                 _ => {},
             }
         }
