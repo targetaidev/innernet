@@ -60,6 +60,23 @@ pub struct Opts {
     pub network: NetworkOpts,
 }
 
+#[derive(Clone, Debug, Args)]
+struct HostsOpt {
+    /// The path to write hosts to
+    #[clap(long = "hosts-path", default_value = "/etc/hosts")]
+    hosts_path: PathBuf,
+
+    /// Don't write to any hosts files
+    #[clap(long = "no-write-hosts", conflicts_with = "hosts_path")]
+    no_write_hosts: bool,
+}
+
+impl From<HostsOpt> for Option<PathBuf> {
+    fn from(opt: HostsOpt) -> Self {
+        (!opt.no_write_hosts).then_some(opt.hosts_path)
+    }
+}
+
 fn update_hosts_file(
     interface: &InterfaceName,
     hosts_path: PathBuf,
