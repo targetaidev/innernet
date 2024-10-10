@@ -180,7 +180,7 @@ impl Server {
             backend: Backend::Kernel,
             #[cfg(not(target_os = "linux"))]
             backend: Backend::Userspace,
-            notify_redeem: Arc::new(tx), 
+            notify_redeem: Arc::new(tx),
         }
     }
 
