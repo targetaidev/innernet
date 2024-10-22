@@ -61,14 +61,14 @@ pub struct ClientConfig {
 #[derive(Debug)]
 pub struct Control {
     interface: InterfaceName,
-    conf: ClientConfig,
+    client_config: ClientConfig,
     network: NetworkOpts,
     nat: NatOpts,
 }
 
 impl Control {
-    pub fn new(conf: ClientConfig, interface: InterfaceName) -> Result<Self, Error> {
-        shared::ensure_dirs_exist(&[&conf.config_dir])?;
+    pub fn new(client_config: ClientConfig, interface: InterfaceName) -> Result<Self, Error> {
+        shared::ensure_dirs_exist(&[&client_config.config_dir])?;
 
         let backend = Backend::variants()
             .first()
@@ -89,7 +89,7 @@ impl Control {
 
         Ok(Self {
             interface,
-            conf,
+            client_config,
             network,
             nat,
         })
@@ -104,7 +104,7 @@ impl Control {
         }
 
         let target_conf = self
-            .conf
+            .client_config
             .config_dir
             .join(self.interface.to_string())
             .with_extension("conf");
@@ -166,7 +166,8 @@ impl Control {
     }
 
     fn fetch(&self) -> Result<(), Error> {
-        let config = InterfaceConfig::from_interface(&self.conf.config_dir, &self.interface)?;
+        let config =
+            InterfaceConfig::from_interface(&self.client_config.config_dir, &self.interface)?;
         let interface_up = match Device::list(self.network.backend) {
             Ok(interfaces) => interfaces.iter().any(|name| name == &self.interface),
             _ => false,
@@ -200,7 +201,7 @@ impl Control {
             "fetching state for {} from server...",
             &self.interface.as_str_lossy().yellow()
         );
-        let mut store = DataStore::open_or_create(&self.conf.data_dir, &self.interface)?;
+        let mut store = DataStore::open_or_create(&self.client_config.data_dir, &self.interface)?;
         let api = Api::new(&config.server);
         let State { peers, cidrs } = api.http("GET", "/user/state")?;
 
@@ -220,7 +221,7 @@ impl Control {
                 .apply(&self.interface, self.network.backend)
                 .with_str(self.interface.to_string())?;
 
-            if let Some(path) = self.conf.hosts_path.clone() {
+            if let Some(path) = self.client_config.hosts_path.clone() {
                 update_hosts_file(&self.interface, path, &peers)?;
             }
 
@@ -285,8 +286,8 @@ impl Control {
     }
 
     pub fn uninstall(&self) -> Result<(), Error> {
-        let config = InterfaceConfig::get_path(&self.conf.config_dir, &self.interface);
-        let data = DataStore::get_path(&self.conf.data_dir, &self.interface);
+        let config = InterfaceConfig::get_path(&self.client_config.config_dir, &self.interface);
+        let data = DataStore::get_path(&self.client_config.data_dir, &self.interface);
 
         if !config.exists() && !data.exists() {
             bail!(
@@ -313,7 +314,8 @@ impl Control {
     }
 
     pub fn set_listen_port(&self, sub_opts: ListenPortOpts) -> Result<Option<u16>, Error> {
-        let mut config = InterfaceConfig::from_interface(&self.conf.config_dir, &self.interface)?;
+        let mut config =
+            InterfaceConfig::from_interface(&self.client_config.config_dir, &self.interface)?;
 
         let listen_port = prompts::set_listen_port(&config.interface, sub_opts)?;
         if let Some(listen_port) = listen_port {
@@ -321,7 +323,7 @@ impl Control {
             log::info!("the interface is updated");
 
             config.interface.listen_port = listen_port;
-            config.write_to_interface(&self.conf.config_dir, &self.interface)?;
+            config.write_to_interface(&self.client_config.config_dir, &self.interface)?;
             log::info!("the config file is updated");
         } else {
             log::info!("exiting without updating the listen port.");
@@ -331,7 +333,8 @@ impl Control {
     }
 
     pub fn override_endpoint(&self, sub_opts: OverrideEndpointOpts) -> Result<(), Error> {
-        let config = InterfaceConfig::from_interface(&self.conf.config_dir, &self.interface)?;
+        let config =
+            InterfaceConfig::from_interface(&self.client_config.config_dir, &self.interface)?;
 
         let endpoint_contents = if sub_opts.unset {
             prompts::unset_override_endpoint(&sub_opts)?.then_some(EndpointContents::Unset)

@@ -27,6 +27,7 @@ use std::{
     time::SystemTime,
 };
 use subtle::ConstantTimeEq;
+use tokio::sync::{mpsc, watch};
 use wireguard_control::{Backend, Device, DeviceUpdate, Key, KeyPair, PeerConfigBuilder};
 
 mod api;
@@ -44,7 +45,8 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 type Db = Arc<Mutex<Connection>>;
 type Endpoints = Arc<RwLock<HashMap<String, SocketAddr>>>;
-type NotifyRedeem = Arc<tokio::sync::mpsc::Sender<()>>;
+type RedeemTx = mpsc::Sender<()>;
+type ShutdownRx = watch::Receiver<()>;
 
 #[derive(Clone)]
 pub struct Context {
@@ -53,7 +55,7 @@ pub struct Context {
     pub interface: InterfaceName,
     pub backend: Backend,
     pub public_key: Key,
-    pub notify_redeem: NotifyRedeem,
+    pub redeem_tx: RedeemTx,
 }
 
 pub struct Session {
@@ -77,7 +79,7 @@ impl Session {
 
 #[derive(Deserialize, Serialize, Debug, Clone)]
 #[serde(rename_all = "kebab-case")]
-pub struct ConfigFile {
+pub struct WgConfig {
     /// The server's WireGuard key
     pub private_key: String,
 
@@ -91,7 +93,7 @@ pub struct ConfigFile {
     pub network_cidr_prefix: u8,
 }
 
-impl ConfigFile {
+impl WgConfig {
     pub fn write_to_path<P: AsRef<Path>>(&self, path: P) -> Result<(), shared::Error> {
         let mut invitation_file = File::create(&path).with_path(&path)?;
         shared::chmod(&invitation_file, 0o600)?;
@@ -154,7 +156,7 @@ impl ServerConfig {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug)]
 pub struct InitializeOpts {
     /// The network name (ex: evilcorp)
     pub network_name: InterfaceName,
@@ -183,9 +185,9 @@ fn create_database<P: AsRef<Path>>(database_path: P) -> Result<Connection, rusql
 
 fn open_database_connection(
     interface: &InterfaceName,
-    conf: &ServerConfig,
+    server_config: &ServerConfig,
 ) -> Result<rusqlite::Connection, shared::Error> {
-    let database_path = conf.database_path(interface);
+    let database_path = server_config.database_path(interface);
     if !Path::new(&database_path).exists() {
         bail!(
             "no database file found at {}",
@@ -330,22 +332,22 @@ fn get_available_ip(
 #[derive(Debug, Clone)]
 pub struct Control {
     interface: InterfaceName,
-    config: ConfigFile,
+    wg_config: WgConfig,
     network: NetworkOpts,
     db: Db,
 }
 
 impl Control {
     pub fn ensure_initialized(
-        conf: &ServerConfig,
+        server_config: &ServerConfig,
         opts: InitializeOpts,
     ) -> Result<Self, shared::Error> {
-        shared::ensure_dirs_exist(&[conf.config_dir(), conf.database_dir()])
+        shared::ensure_dirs_exist(&[server_config.config_dir(), server_config.database_dir()])
             .map_err(|_| anyhow!("Failed to create config and database directories",))?;
 
-        let database_path = conf.database_path(&opts.network_name);
+        let database_path = server_config.database_path(&opts.network_name);
         let conn = match std::fs::metadata(&database_path) {
-            Ok(_) => open_database_connection(&opts.network_name, conf)?,
+            Ok(_) => open_database_connection(&opts.network_name, server_config)?,
             Err(_) => create_database(&database_path)
                 .map_err(|_| anyhow!("failed to create database",))?,
         };
@@ -364,12 +366,12 @@ impl Control {
             opts.listen_port,
         )?;
 
-        let config_path = conf.config_path(&opts.network_name);
+        let config_path = server_config.config_path(&opts.network_name);
 
-        let config = match server_key {
-            None => ConfigFile::from_file(config_path)?,
+        let wg_config = match server_key {
+            None => WgConfig::from_file(config_path)?,
             Some(key) => {
-                let config = ConfigFile {
+                let config = WgConfig {
                     private_key: key.private.to_base64(),
                     listen_port: opts.listen_port,
                     address: server_cidr.cidr.addr(),
@@ -396,7 +398,7 @@ impl Control {
 
         Ok(Self {
             interface: opts.network_name,
-            config,
+            wg_config,
             network,
             db,
         })
@@ -505,7 +507,8 @@ impl Control {
     ) -> Result<InterfaceConfig, ServerError> {
         let cidr_tree = CidrTree::new(cidrs);
 
-        let server_api_endpoint = &SocketAddr::new(self.config.address, self.config.listen_port);
+        let server_api_endpoint =
+            &SocketAddr::new(self.wg_config.address, self.wg_config.listen_port);
 
         let peer_invitation = InterfaceConfig {
             interface: InterfaceInfo {
@@ -554,7 +557,7 @@ impl Control {
         Ok(())
     }
 
-    pub async fn serve(&self, notify_redeem: NotifyRedeem) -> Result<(), shared::Error> {
+    pub fn up(&self) -> Result<(), shared::Error> {
         let conn = self.db.lock();
 
         let mut peers = DatabasePeer::list(&conn)?;
@@ -567,9 +570,9 @@ impl Control {
         log::info!("bringing up interface.");
         wg::up(
             &self.interface,
-            &self.config.private_key,
-            IpNet::new(self.config.address, self.config.network_cidr_prefix)?,
-            Some(self.config.listen_port),
+            &self.wg_config.private_key,
+            IpNet::new(self.wg_config.address, self.wg_config.network_cidr_prefix)?,
+            Some(self.wg_config.listen_port),
             None,
             self.network,
         )?;
@@ -581,12 +584,12 @@ impl Control {
         log::info!("{} peers added to wireguard interface.", peers.len());
 
         let candidates: Vec<shared::Endpoint> = get_local_addrs()?
-            .map(|addr| SocketAddr::from((addr, self.config.listen_port)).into())
+            .map(|addr| SocketAddr::from((addr, self.wg_config.listen_port)).into())
             .collect();
         let num_candidates = candidates.len();
         let myself = peers
             .iter_mut()
-            .find(|peer| peer.ip == self.config.address)
+            .find(|peer| peer.ip == self.wg_config.address)
             .expect("Couldn't find server peer in peer list.");
         myself.update(
             &conn,
@@ -595,15 +598,21 @@ impl Control {
                 ..myself.contents.clone()
             },
         )?;
-        drop(conn);
 
         log::info!(
             "{} local candidates added to server peer config.",
             num_candidates
         );
+        Ok(())
+    }
 
+    pub async fn serve(
+        &self,
+        redeem_tx: RedeemTx,
+        mut shutdown_rx: ShutdownRx,
+    ) -> Result<(), shared::Error> {
         let public_key =
-            wireguard_control::Key::from_base64(&self.config.private_key)?.get_public();
+            wireguard_control::Key::from_base64(&self.wg_config.private_key)?.get_public();
         let endpoints = spawn_endpoint_refresher(self.interface, self.network);
         spawn_expired_invite_sweeper(self.db.clone());
 
@@ -613,13 +622,13 @@ impl Control {
             interface: self.interface,
             public_key,
             backend: self.network.backend,
-            notify_redeem,
+            redeem_tx,
         };
 
         log::info!("innernet-server {} starting.", VERSION);
 
         let listener = get_listener(
-            (self.config.address, self.config.listen_port).into(),
+            (self.wg_config.address, self.wg_config.listen_port).into(),
             &self.interface,
         )?;
 
@@ -636,7 +645,11 @@ impl Control {
 
         let server = hyper::Server::from_tcp(listener)?.serve(make_svc);
 
-        server.await?;
+        server
+            .with_graceful_shutdown(async {
+                shutdown_rx.changed().await.ok();
+            })
+            .await?;
 
         Ok(())
     }

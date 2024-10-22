@@ -121,7 +121,7 @@ mod handlers {
                     .apply(&interface, backend)
                     .map_err(|e| log::error!("{:?}", e))
                     .ok();
-                let _ = session.context.notify_redeem.try_send(());
+                let _ = session.context.redeem_tx.try_send(());
             });
         }
         status_response(StatusCode::NO_CONTENT)
