@@ -137,7 +137,7 @@ impl Control {
 
         let mut up_success = false;
         for _ in 0..3 {
-            if self.fetch().is_ok() {
+            if self.up().is_ok() {
                 up_success = true;
                 break;
             }
@@ -152,20 +152,7 @@ impl Control {
         Ok(())
     }
 
-    pub fn up(&self, loop_interval: Option<Duration>) -> Result<(), Error> {
-        loop {
-            self.fetch()?;
-
-            match loop_interval {
-                Some(interval) => thread::sleep(interval),
-                None => break,
-            }
-        }
-
-        Ok(())
-    }
-
-    fn fetch(&self) -> Result<(), Error> {
+    pub fn up(&self) -> Result<(), Error> {
         let config =
             InterfaceConfig::from_interface(&self.client_config.config_dir, &self.interface)?;
         let interface_up = match Device::list(self.network.backend) {
