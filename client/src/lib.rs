@@ -66,6 +66,12 @@ pub struct Control {
     nat: NatOpts,
 }
 
+pub trait Controllable {
+    fn up(&self) -> Result<(), Error>;
+    fn install(&self, config: InterfaceConfig) -> Result<(), Error>;
+    fn uninstall(&self) -> Result<(), Error>;
+}
+
 impl Control {
     pub fn new(client_config: ClientConfig, interface: InterfaceName) -> Result<Self, Error> {
         shared::ensure_dirs_exist(&[&client_config.config_dir])?;
@@ -95,7 +101,57 @@ impl Control {
         })
     }
 
-    pub fn install(&self, config: InterfaceConfig) -> Result<(), Error> {
+    pub fn set_listen_port(&self, sub_opts: ListenPortOpts) -> Result<Option<u16>, Error> {
+        let mut config =
+            InterfaceConfig::from_interface(&self.client_config.config_dir, &self.interface)?;
+
+        let listen_port = prompts::set_listen_port(&config.interface, sub_opts)?;
+        if let Some(listen_port) = listen_port {
+            wg::set_listen_port(&self.interface, listen_port, self.network.backend)?;
+            log::info!("the interface is updated");
+
+            config.interface.listen_port = listen_port;
+            config.write_to_interface(&self.client_config.config_dir, &self.interface)?;
+            log::info!("the config file is updated");
+        } else {
+            log::info!("exiting without updating the listen port.");
+        }
+
+        Ok(listen_port.flatten())
+    }
+
+    pub fn override_endpoint(&self, sub_opts: OverrideEndpointOpts) -> Result<(), Error> {
+        let config =
+            InterfaceConfig::from_interface(&self.client_config.config_dir, &self.interface)?;
+
+        let endpoint_contents = if sub_opts.unset {
+            prompts::unset_override_endpoint(&sub_opts)?.then_some(EndpointContents::Unset)
+        } else {
+            let port = match config.interface.listen_port {
+                Some(port) => port,
+                None => bail!("you need to set a listen port with set-listen-port before overriding the endpoint (otherwise port randomization on the interface would make it useless).")
+            };
+            let endpoint = prompts::override_endpoint(&sub_opts, port)?;
+            endpoint.map(EndpointContents::Set)
+        };
+
+        if let Some(contents) = endpoint_contents {
+            log::info!("requesting endpoint update...");
+            Api::new(&config.server).http_form::<_, ()>("PUT", "/user/endpoint", contents)?;
+            log::info!(
+                "endpoint override {}",
+                if sub_opts.unset { "unset" } else { "set" }
+            );
+        } else {
+            log::info!("exiting without overriding endpoint");
+        }
+
+        Ok(())
+    }
+}
+
+impl Controllable for Control {
+    fn install(&self, config: InterfaceConfig) -> Result<(), Error> {
         if config.interface.network_name != self.interface.to_string() {
             bail!(
                 "Expected interface's network name to equal \"{}\".",
@@ -152,7 +208,7 @@ impl Control {
         Ok(())
     }
 
-    pub fn up(&self) -> Result<(), Error> {
+    fn up(&self) -> Result<(), Error> {
         let config =
             InterfaceConfig::from_interface(&self.client_config.config_dir, &self.interface)?;
         let interface_up = match Device::list(self.network.backend) {
@@ -272,7 +328,7 @@ impl Control {
         Ok(())
     }
 
-    pub fn uninstall(&self) -> Result<(), Error> {
+    fn uninstall(&self) -> Result<(), Error> {
         let config = InterfaceConfig::get_path(&self.client_config.config_dir, &self.interface);
         let data = DataStore::get_path(&self.client_config.data_dir, &self.interface);
 
@@ -297,54 +353,6 @@ impl Control {
             "network {} is uninstalled.",
             &self.interface.as_str_lossy().yellow()
         );
-        Ok(())
-    }
-
-    pub fn set_listen_port(&self, sub_opts: ListenPortOpts) -> Result<Option<u16>, Error> {
-        let mut config =
-            InterfaceConfig::from_interface(&self.client_config.config_dir, &self.interface)?;
-
-        let listen_port = prompts::set_listen_port(&config.interface, sub_opts)?;
-        if let Some(listen_port) = listen_port {
-            wg::set_listen_port(&self.interface, listen_port, self.network.backend)?;
-            log::info!("the interface is updated");
-
-            config.interface.listen_port = listen_port;
-            config.write_to_interface(&self.client_config.config_dir, &self.interface)?;
-            log::info!("the config file is updated");
-        } else {
-            log::info!("exiting without updating the listen port.");
-        }
-
-        Ok(listen_port.flatten())
-    }
-
-    pub fn override_endpoint(&self, sub_opts: OverrideEndpointOpts) -> Result<(), Error> {
-        let config =
-            InterfaceConfig::from_interface(&self.client_config.config_dir, &self.interface)?;
-
-        let endpoint_contents = if sub_opts.unset {
-            prompts::unset_override_endpoint(&sub_opts)?.then_some(EndpointContents::Unset)
-        } else {
-            let port = match config.interface.listen_port {
-                Some(port) => port,
-                None => bail!("you need to set a listen port with set-listen-port before overriding the endpoint (otherwise port randomization on the interface would make it useless).")
-            };
-            let endpoint = prompts::override_endpoint(&sub_opts, port)?;
-            endpoint.map(EndpointContents::Set)
-        };
-
-        if let Some(contents) = endpoint_contents {
-            log::info!("requesting endpoint update...");
-            Api::new(&config.server).http_form::<_, ()>("PUT", "/user/endpoint", contents)?;
-            log::info!(
-                "endpoint override {}",
-                if sub_opts.unset { "unset" } else { "set" }
-            );
-        } else {
-            log::info!("exiting without overriding endpoint");
-        }
-
         Ok(())
     }
 }
