@@ -669,7 +669,7 @@ dependencies = [
 
 [[package]]
 name = "innernet-server"
-version = "1.6.1"
+version = "1.6.2"
 dependencies = [
  "anyhow",
  "bytes",
