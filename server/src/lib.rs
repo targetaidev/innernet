@@ -265,7 +265,7 @@ fn ensure_server_peer(
     server_cidr: &shared::Cidr,
     external_endpoint: &Option<shared::Endpoint>,
     listen_port: u16,
-) -> Result<(shared::Peer, Option<KeyPair>), shared::Error> {
+) -> Result<(DatabasePeer, Option<KeyPair>), shared::Error> {
     let peers = DatabasePeer::list(conn)?;
 
     let server_peer_name = SERVER_NAME.parse().map_err(anyhow::Error::msg)?;
@@ -300,9 +300,9 @@ fn ensure_server_peer(
             )
             .map_err(|_| anyhow!("failed to create innernet peer."))?;
 
-            Ok((peer.inner, Some(our_keypair)))
+            Ok((peer, Some(our_keypair)))
         },
-        Some(peer) => Ok((peer.inner, None)),
+        Some(peer) => Ok((peer, None)),
     }
 }
 
@@ -359,7 +359,7 @@ impl Control {
 
         let server_cidr = ensure_server_cidr(&conn, &mut cidrs, &opts.network_cidr, root_cidr.id)?;
 
-        let (_server_peer, server_key) = ensure_server_peer(
+        let (server_peer, server_key) = ensure_server_peer(
             &conn,
             &server_cidr,
             &opts.external_endpoint,
@@ -378,8 +378,15 @@ impl Control {
                     network_cidr_prefix: opts.network_cidr.prefix_len(),
                 };
 
-                config.write_to_path(config_path)?;
-                config
+                match config.write_to_path(config_path) {
+                    Ok(_) => config,
+                    Err(err) => {
+                        server_peer
+                            .delete(&conn)
+                            .map_err(|_| anyhow!("failed to delete innernet peer."))?;
+                        bail!("couldn't write to config file: {}", err);
+                    },
+                }
             },
         };
 
