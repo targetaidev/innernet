@@ -28,7 +28,7 @@ use std::{
 };
 use subtle::ConstantTimeEq;
 use tokio::sync::{mpsc, watch};
-use wireguard_control::{Backend, Device, DeviceUpdate, Key, KeyPair, PeerConfigBuilder};
+use wireguard_control::{Device, DeviceUpdate, Key, KeyPair, PeerConfigBuilder};
 
 mod api;
 mod db;
@@ -39,7 +39,7 @@ mod util;
 
 pub use error::ServerError;
 pub use shared::Peer;
-pub use wireguard_control::InterfaceName;
+pub use wireguard_control::{Backend, InterfaceName};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -123,13 +123,15 @@ impl WgConfig {
 pub struct ServerConfig {
     pub config_dir: PathBuf,
     pub data_dir: PathBuf,
+    pub backend: Option<Backend>,
 }
 
 impl ServerConfig {
-    pub fn new(config_dir: PathBuf, data_dir: PathBuf) -> Self {
+    pub fn new(config_dir: PathBuf, data_dir: PathBuf, backend: Option<Backend>) -> Self {
         Self {
             config_dir,
             data_dir,
+            backend,
         }
     }
 
@@ -390,16 +392,11 @@ impl Control {
             },
         };
 
-        let backend = Backend::variants()
-            .first()
-            .and_then(|s| s.parse::<Backend>().ok())
-            .ok_or_else(|| anyhow!("failed to select backend for wg"))?;
-
         let db = Arc::new(Mutex::new(conn));
 
         let network = NetworkOpts {
             no_routing: false,
-            backend,
+            backend: server_config.backend.unwrap_or_default(),
             mtu: None,
         };
 

@@ -1,4 +1,4 @@
-use anyhow::{anyhow, bail};
+use anyhow::bail;
 use colored::*;
 use data_store::DataStore;
 use hostsfile::HostsBuilder;
@@ -16,14 +16,14 @@ use std::{
     time::{Duration, Instant},
 };
 use util::Api;
-use wireguard_control::{Backend, Device, DeviceUpdate, PeerConfigBuilder};
+use wireguard_control::{Device, DeviceUpdate, PeerConfigBuilder};
 
 mod data_store;
 mod nat;
 pub mod util;
 
 pub use shared::interface_config::{InterfaceConfig, InterfaceInfo, ServerInfo};
-pub use wireguard_control::InterfaceName;
+pub use wireguard_control::{Backend, InterfaceName};
 
 fn update_hosts_file(
     interface: &InterfaceName,
@@ -56,6 +56,7 @@ pub struct ClientConfig {
     pub hosts_path: Option<PathBuf>,
     pub config_dir: PathBuf,
     pub data_dir: PathBuf,
+    pub backend: Option<Backend>,
 }
 
 #[derive(Debug)]
@@ -76,14 +77,9 @@ impl Control {
     pub fn new(client_config: ClientConfig, interface: InterfaceName) -> Result<Self, Error> {
         shared::ensure_dirs_exist(&[&client_config.config_dir])?;
 
-        let backend = Backend::variants()
-            .first()
-            .and_then(|s| s.parse::<Backend>().ok())
-            .ok_or_else(|| anyhow!("failed to select backend for wg"))?;
-
         let network = NetworkOpts {
             no_routing: false,
-            backend,
+            backend: client_config.backend.unwrap_or_default(),
             mtu: None,
         };
 
