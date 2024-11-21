@@ -56,7 +56,7 @@ pub struct ClientConfig {
     pub hosts_path: Option<PathBuf>,
     pub config_dir: PathBuf,
     pub data_dir: PathBuf,
-    pub backend: Backend,
+    pub backend: Option<Backend>,
 }
 
 #[derive(Debug)]
@@ -79,7 +79,7 @@ impl Control {
 
         let network = NetworkOpts {
             no_routing: false,
-            backend: client_config.backend,
+            backend: client_config.backend.unwrap_or_default(),
             mtu: None,
         };
 

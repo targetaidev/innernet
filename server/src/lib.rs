@@ -123,11 +123,11 @@ impl WgConfig {
 pub struct ServerConfig {
     pub config_dir: PathBuf,
     pub data_dir: PathBuf,
-    pub backend: Backend,
+    pub backend: Option<Backend>,
 }
 
 impl ServerConfig {
-    pub fn new(config_dir: PathBuf, data_dir: PathBuf, backend: Backend) -> Self {
+    pub fn new(config_dir: PathBuf, data_dir: PathBuf, backend: Option<Backend>) -> Self {
         Self {
             config_dir,
             data_dir,
@@ -396,7 +396,7 @@ impl Control {
 
         let network = NetworkOpts {
             no_routing: false,
-            backend: server_config.backend,
+            backend: server_config.backend.unwrap_or_default(),
             mtu: None,
         };
 
