@@ -424,7 +424,11 @@ impl Control {
             .collect())
     }
 
-    pub fn add_peer(&self, edge_id: String) -> Result<InterfaceConfig, ServerError> {
+    pub fn add_peer(
+        &self,
+        edge_id: String,
+        invite_expires_at: Option<SystemTime>,
+    ) -> Result<InterfaceConfig, ServerError> {
         if edge_id == SERVER_NAME {
             return Err(ServerError::InvalidQuery);
         }
@@ -476,7 +480,7 @@ impl Control {
             is_disabled: false,
             is_redeemed: false,
             persistent_keepalive_interval: Some(PERSISTENT_KEEPALIVE_INTERVAL_SECS),
-            invite_expires: Some(SystemTime::now() + Duration::from_secs(15 * 60)),
+            invite_expires: invite_expires_at,
             candidates: vec![],
         };
 

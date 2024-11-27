@@ -93,7 +93,7 @@ impl Server {
         let conf = ServerConfig {
             config_dir: test_dir_path.to_path_buf(),
             data_dir: test_dir_path.to_path_buf(),
-            backend: Backend::Kernel,
+            backend: Some(Backend::Kernel),
         };
 
         let opts = InitializeOpts {
