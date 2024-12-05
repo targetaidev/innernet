@@ -39,7 +39,7 @@ pub enum ServerError {
     Hyper(#[from] hyper::Error),
 }
 
-impl<'a> From<&'a ServerError> for StatusCode {
+impl From<&ServerError> for StatusCode {
     fn from(error: &ServerError) -> StatusCode {
         use ServerError::*;
         match error {
