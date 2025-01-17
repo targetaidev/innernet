@@ -94,6 +94,7 @@ impl Server {
             config_dir: test_dir_path.to_path_buf(),
             data_dir: test_dir_path.to_path_buf(),
             backend: Some(Backend::Kernel),
+            mtu: None,
         };
 
         let opts = InitializeOpts {
