@@ -124,17 +124,10 @@ pub struct ServerConfig {
     pub config_dir: PathBuf,
     pub data_dir: PathBuf,
     pub backend: Option<Backend>,
+    pub mtu: Option<u32>,
 }
 
 impl ServerConfig {
-    pub fn new(config_dir: PathBuf, data_dir: PathBuf, backend: Option<Backend>) -> Self {
-        Self {
-            config_dir,
-            data_dir,
-            backend,
-        }
-    }
-
     pub fn database_dir(&self) -> &Path {
         &self.data_dir
     }

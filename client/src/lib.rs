@@ -57,6 +57,7 @@ pub struct ClientConfig {
     pub config_dir: PathBuf,
     pub data_dir: PathBuf,
     pub backend: Option<Backend>,
+    pub mtu: Option<u32>,
 }
 
 #[derive(Debug)]
@@ -80,7 +81,7 @@ impl Control {
         let network = NetworkOpts {
             no_routing: false,
             backend: client_config.backend.unwrap_or_default(),
-            mtu: None,
+            mtu: client_config.mtu,
         };
 
         let nat = NatOpts {
