@@ -390,7 +390,7 @@ impl Control {
         let network = NetworkOpts {
             no_routing: false,
             backend: server_config.backend.unwrap_or_default(),
-            mtu: None,
+            mtu: server_config.mtu,
         };
 
         Ok(Self {
