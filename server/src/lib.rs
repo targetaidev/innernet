@@ -28,7 +28,7 @@ use std::{
 };
 use subtle::ConstantTimeEq;
 use tokio::sync::{mpsc, watch};
-use wireguard_control::{Device, DeviceUpdate, Key, KeyPair, PeerConfigBuilder};
+use wireguard_control::{Device, DeviceUpdate, Key, KeyPair, PeerConfigBuilder, PeerStats};
 
 mod api;
 mod db;
@@ -653,6 +653,11 @@ impl Control {
             .await?;
 
         Ok(())
+    }
+
+    pub fn stats(&self) -> Result<Vec<PeerStats>, std::io::Error> {
+        Device::get(&self.interface, self.network.backend)
+            .map(|device| device.peers.into_iter().map(|peer| peer.stats).collect())
     }
 }
 
