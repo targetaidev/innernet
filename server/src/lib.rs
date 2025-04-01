@@ -655,9 +655,24 @@ impl Control {
         Ok(())
     }
 
-    pub fn stats(&self) -> Result<Vec<PeerStats>, std::io::Error> {
-        Device::get(&self.interface, self.network.backend)
-            .map(|device| device.peers.into_iter().map(|peer| peer.stats).collect())
+    pub fn get_stats(&self) -> Result<HashMap<String, PeerStats>, ServerError> {
+        let peers_from_wg = Device::get(&self.interface, self.network.backend)?.peers;
+        let peers_from_db = self.get_peers()?;
+
+        let mut result: HashMap<String, PeerStats> = HashMap::with_capacity(peers_from_db.len());
+
+        let peers_name_map: HashMap<String, shared::Hostname> = peers_from_db
+            .into_iter()
+            .map(|peer| (peer.contents.public_key, peer.contents.name))
+            .collect();
+
+        for peer in peers_from_wg {
+            if let Some(name) = peers_name_map.get(&peer.config.public_key.to_base64()) {
+                result.insert(name.to_string(), peer.stats);
+            }
+        }
+
+        Ok(result)
     }
 }
 
