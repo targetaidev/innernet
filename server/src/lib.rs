@@ -28,7 +28,7 @@ use std::{
 };
 use subtle::ConstantTimeEq;
 use tokio::sync::{mpsc, watch};
-use wireguard_control::{Device, DeviceUpdate, Key, KeyPair, PeerConfigBuilder};
+use wireguard_control::{Device, DeviceUpdate, Key, KeyPair, PeerConfigBuilder, PeerStats};
 
 mod api;
 mod db;
@@ -390,7 +390,7 @@ impl Control {
         let network = NetworkOpts {
             no_routing: false,
             backend: server_config.backend.unwrap_or_default(),
-            mtu: None,
+            mtu: server_config.mtu,
         };
 
         Ok(Self {
@@ -653,6 +653,26 @@ impl Control {
             .await?;
 
         Ok(())
+    }
+
+    pub fn get_stats(&self) -> Result<HashMap<String, PeerStats>, ServerError> {
+        let peers_from_wg = Device::get(&self.interface, self.network.backend)?.peers;
+        let peers_from_db = self.get_peers()?;
+
+        let mut result: HashMap<String, PeerStats> = HashMap::with_capacity(peers_from_db.len());
+
+        let peers_name_map: HashMap<String, shared::Hostname> = peers_from_db
+            .into_iter()
+            .map(|peer| (peer.contents.public_key, peer.contents.name))
+            .collect();
+
+        for peer in peers_from_wg {
+            if let Some(name) = peers_name_map.get(&peer.config.public_key.to_base64()) {
+                result.insert(name.to_string(), peer.stats);
+            }
+        }
+
+        Ok(result)
     }
 }
 
